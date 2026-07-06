@@ -6,15 +6,19 @@ on:
     - cron: '0 12 * * *'
   workflow_dispatch: # ブラウザ上から手動で即時実行できるボタンを配置
 
+# 🌟 変更：リポジトリへの書き込み権限を明示的に許可
+permissions:
+  contents: write
+
 jobs:
   update-csv:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4 # 最新版に推奨アップデート
 
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5 # 最新版に推奨アップデート
       with:
         python-version: '3.10'
 
@@ -37,4 +41,5 @@ jobs:
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
         git add *.csv
+        # 変更がある場合のみコミットしてプッシュ
         git diff --cached --quiet || (git commit -m "🤖 Auto-updated Loto CSV files [skip ci]" && git push)
