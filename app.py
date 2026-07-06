@@ -155,7 +155,68 @@ def append_result_to_csv(file_path, loto_type, result_dict):
 
 
 # ==================================================
-# 2. バックエンド（分析・予想ロジック：曜日別分析追加版）
+# 2. 相性遷移予測ロジック（loto-predictor-app.py から移植）
+# ==================================================
+def predict_next_set_ball_advanced(df):
+    """前回セット球の直後に出やすいセット球の相性を可変ウィンドウで解析する"""
+    if 'セット' not in df.columns or len(df) < 2:
+        return "データなし", "ー", "データ不足のため分析できません"
+        
+    last_set = df['セット'].iloc[-1]
+    if pd.isna(last_set) or last_set == "未設定" or str(last_set).strip() == "":
+        return "データなし", "ー", "前回のセット球データが未設定です"
+
+    total_rows = len(df)
+    current_window = 50  
+    max_possible_window = total_rows - 1  
+
+    while True:
+        start_idx = max(0, total_rows - 1 - current_window)
+        sub_df = df.iloc[start_idx:]
+        
+        transitions = []
+        for i in range(len(sub_df) - 1):
+            if sub_df['セット'].iloc[i] == last_set:
+                next_val = sub_df['セット'].iloc[i+1]
+                if pd.notna(next_val) and str(next_val).strip() != "" and next_val != "未設定":
+                    transitions.append(next_val)
+                    
+        counts = {}
+        for s in transitions:
+            counts[s] = counts.get(s, 0) + 1
+            
+        if not counts:
+            if current_window >= max_possible_window: break
+            current_window += 10
+            continue
+            
+        max_val = max(counts.values())
+        min_val = min(counts.values())
+        
+        hots = [k for k, v in counts.items() if v == max_val]
+        colds = [k for k, v in counts.items() if v == min_val]
+        
+        if (len(hots) == 1 and len(colds) == 1) or current_window >= max_possible_window:
+            break
+            
+        next_window = current_window + 10
+        if next_window > max_possible_window:
+            current_window = max_possible_window
+        else:
+            current_window = next_window
+
+    if not counts:
+        return "分析不能", "ー", f"過去のデータに前回と同じ【{last_set}セット】の事例がありませんでした"
+
+    hot_set = hots[0]
+    cold_set = colds[0]
+
+    status_msg = f"前回【{last_set}セット】の直後傾向を解析（過去 {current_window} 回から自動判定）"
+    return hot_set, cold_set, status_msg
+
+
+# ==================================================
+# 3. バックエンド（分析・予想ロジック）
 # ==================================================
 def generate_loto_predictions(file_path, loto_type="loto7", num_combinations=5, bias_numbers=None, target_dow_str=None):
     config = {
@@ -188,9 +249,15 @@ def generate_loto_predictions(file_path, loto_type="loto7", num_combinations=5, 
     df = pd.read_csv(file_path)
     df = df.sort_values(by="開催回").reset_index(drop=True)
 
-    # セット球の予想
-    recent_10_sets = df.tail(10)["セット"].value_counts().reindex(all_sets, fill_value=0)
-    predicted_set = recent_10_sets.sort_values(ascending=True).index[0]
+    # 🌟【ロジック置換】loto-predictor-app.py の高度な相性遷移予測を適用
+    hot_set, cold_set, set_status_msg = predict_next_set_ball_advanced(df)
+    
+    if hot_set in ["データなし", "分析不能"]:
+        # 解析できない場合のセーフティフォールバックとして従来の最少出現セットを使用
+        recent_10_sets = df.tail(10)["セット"].value_counts().reindex(all_sets, fill_value=0)
+        predicted_set = recent_10_sets.sort_values(ascending=True).index[0]
+    else:
+        predicted_set = hot_set
 
     # 出現回数の集計
     def count_occurrences(target_df):
@@ -218,7 +285,7 @@ def generate_loto_predictions(file_path, loto_type="loto7", num_combinations=5, 
     score_df["直近5回スコア"] = res_5 * 2.0
     score_df["セット球相性スコア"] = set_rate * 0.3
 
-    # 【新機能】ロト6のみ：曜日別相性スコアの計算
+    # ロト6のみ：曜日別相性スコアの計算
     score_df["曜日別相性スコア"] = 0.0
     if loto_type == "loto6" and target_dow_str:
         target_dow = 0 if target_dow_str == "月曜日" else 3  # 0=月曜, 3=木曜
@@ -274,11 +341,11 @@ def generate_loto_predictions(file_path, loto_type="loto7", num_combinations=5, 
                 predictions.append(chosen_sorted)
                 break
 
-    return predicted_set, score_df.sort_values(by="総合スコア", ascending=False), predictions
+    return predicted_set, score_df.sort_values(by="総合スコア", ascending=False), predictions, set_status_msg
 
 
 # ==================================================
-# 3. フロントエンド（Streamlit画面表示）
+# 4. フロントエンド（Streamlit画面表示）
 # ==================================================
 st.set_page_config(page_title="ロト予想・分析ナビ", layout="wide")
 
@@ -291,7 +358,7 @@ st.sidebar.header("⚙️ システム設定")
 loto_type = st.sidebar.selectbox("分析するくじ種を選択", ("loto7", "loto6", "miniloto"))
 csv_file = f"{loto_type}_history.csv"
 
-# 【新機能】ロト6専用の曜日選択パネル＆自動曜日推測
+# ロト6専用の曜日選択パネル＆自動曜日推測
 loto6_dow = None
 if loto_type == "loto6" and os.path.exists(csv_file):
     try:
@@ -328,7 +395,7 @@ st.sidebar.subheader("🔮 ビアス式 絞り込み数字")
 bias_input = st.sidebar.text_area(
     f"{loto_type.upper()} の絞り込み数字を入力：",
     value=st.session_state[f"permanent_bias_{loto_type}"],
-    help="対象URLの『ビアス式絞り込み予想』の下にある数字をコピーして貼り付けてください。",
+    help="対象URL of 『ビアス式絞り込み予想』の下にある数字をコピーして貼り付けてください。",
 )
 st.session_state[f"permanent_bias_{loto_type}"] = bias_input
 bias_numbers = [int(s) for s in re.findall(r"\d+", bias_input)]
@@ -404,8 +471,8 @@ else:
     latest_round_in_csv = df_info["開催回"].max()
     st.caption(f"現在のCSV内の最新データ：**第 {latest_round_in_csv} 回** （データ総数: {len(df_info)}件）")
 
-    # 予想実行 (新引数 target_dow_str を引き渡し)
-    predicted_set, score_table, lucky_numbers = generate_loto_predictions(
+    # 予想実行 (相性遷移ロジック対応版)
+    predicted_set, score_table, lucky_numbers, set_status_msg = generate_loto_predictions(
         csv_file, loto_type=loto_type, bias_numbers=bias_numbers, target_dow_str=loto6_dow
     )
 
@@ -417,9 +484,10 @@ else:
             st.subheader(f"📅 分析対象の曜日: {loto6_dow}")
             st.info(f"今回は **【 {loto6_dow} 】** の過去データに基づく曜日別相性を加味して分析しています。")
 
+        # 🔮 修正したセット球の表示部分
         st.subheader("🔮 次回の予想セット球")
         st.info(f"次回使われる可能性が高いのは **【 {predicted_set} セット 】** です。")
-        st.write("※根拠：直近10回の抽選で出現回数が最も少なく、次回のローテーションで選ばれる確率が一番高いため。")
+        st.caption(f"💡 【AI解析ステータス】  \n{set_status_msg}")
 
         st.subheader("📊 過去50回のグループ分け（ベース）")
         high_nums = score_table[score_table["グループ"] == "高頻度"].index.tolist()
