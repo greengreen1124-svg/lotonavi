@@ -1,0 +1,40 @@
+name: Loto CSV Auto Updater
+
+on:
+  schedule:
+    # 毎日日本時間の21:00に自動実行 (21:00 JST = 12:00 UTC)
+    - cron: '0 12 * * *'
+  workflow_dispatch: # ブラウザ上から手動で即時実行できるボタンを配置
+
+jobs:
+  update-csv:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pandas numpy requests beautifulsoup4
+
+    - name: Run Loto6 Updater
+      run: python loto6-updater.py
+
+    - name: Run Loto7 Updater
+      run: python loto7-updater.py
+
+    - name: Run MiniLoto Updater
+      run: python miniloto-updater.py
+
+    - name: Commit and Push changes
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add *.csv
+        git diff --cached --quiet || (git commit -m "🤖 Auto-updated Loto CSV files [skip ci]" && git push)
