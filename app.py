@@ -218,7 +218,7 @@ def predict_next_set_ball_advanced(df):
 # ==================================================
 # 3. バックエンド（分析・予想ロジック）
 # ==================================================
-# 🌟引数に user_selected_set を追加
+# 🌟 引数に user_selected_set を追加
 def generate_loto_predictions(file_path, loto_type="loto7", num_combinations=5, bias_numbers=None, target_dow_str=None, user_selected_set="自動"):
     config = {
         "loto7": {
@@ -250,12 +250,11 @@ def generate_loto_predictions(file_path, loto_type="loto7", num_combinations=5, 
     df = pd.read_csv(file_path)
     df = df.sort_values(by="開催回").reset_index(drop=True)
 
-    # 🌟【ロジック修正】ユーザーの選択状態によってセット球の決定方法を分岐
+    # 🌟【ロジック修正】ユーザーの選択状況によってセット球の決定方法を分岐
     hot_set, cold_set, set_status_msg = predict_next_set_ball_advanced(df)
     
     if user_selected_set == "自動":
         if hot_set in ["データなし", "分析不能"]:
-            # 解析できない場合のセーフティフォールバックとして従来の最少出現セットを使用
             recent_10_sets = df.tail(10)["セット"].value_counts().reindex(all_sets, fill_value=0)
             predicted_set = recent_10_sets.sort_values(ascending=True).index[0]
         else:
@@ -274,7 +273,7 @@ def generate_loto_predictions(file_path, loto_type="loto7", num_combinations=5, 
     res_10 = count_occurrences(df.tail(10))
     res_5 = count_occurrences(df.tail(5))
 
-    # セット球相性（ユーザー指定の場合も、ここで指定されたセット球のデータが抽出されます）
+    # セット球相性（指定されたセット球のデータから相性を抽出）
     set_df = df[df["セット"] == predicted_set]
     total_set_used = len(set_df)
 
@@ -353,7 +352,7 @@ def generate_loto_predictions(file_path, loto_type="loto7", num_combinations=5, 
 # ==================================================
 # 4. フロントエンド（Streamlit画面表示）
 # ==================================================
-# ※ st.set_page_config は最初のみに統一するため、重複部分を削除し統合
+st.set_page_config(page_title="ロト予想・分析ナビ", layout="wide")
 
 st.title("🎯 ロトAI予想・トレンド分析サイト")
 st.caption("過去の出現傾向 × セット球ローテーション × 曜日別サイクル（LOTO6） × ビアス式絞り込みの融合システム")
@@ -387,12 +386,11 @@ if loto_type == "loto6" and os.path.exists(csv_file):
         help="直近のCSVデータから次回の抽選曜日を自動推測しています。手動で切り替えることも可能です。"
     )
 
-# 🌟【新機能】サイドバーにセット球の選択UIを追加
+# 🌟【新設】サイドバーにセット球の手動選択UIを追加
 st.sidebar.subheader("🔮 セット球の指定")
-all_available_sets = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
 user_selected_set = st.sidebar.selectbox(
     "分析に使用するセット球を選択",
-    ["自動"] + all_available_sets,
+    ["自動", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J"],
     index=0,
     help="『自動』にすると、過去の遷移から最適なセット球を自動予測します。特定のセット球に固定して相性を分析したい場合はアルファベットを選択してください。"
 )
@@ -450,7 +448,7 @@ if os.path.exists(csv_file):
         b_num = 2 if loto_type == "loto7" else 1
 
         m_nums_str = st.text_input(f"本数字 ({p_num}個をスペース区切りで)", value="")
-        m_bonus_str = st.text_input(f"ボーナス数字 ({b_num}個をスペース区切りで)", value="")
+        m_bonus_str = st.text_input(f"ボーナス数字 ({b_num}個をスペース区切り為で)", value="")
         m_set = st.selectbox("セット球", ("A", "B", "C", "D", "E", "F", "G", "H", "I", "J"))
 
         if st.button("➕ 手動入力データをCSVに追加"):
@@ -484,7 +482,7 @@ else:
     latest_round_in_csv = df_info["開催回"].max()
     st.caption(f"現在のCSV内の最新データ：**第 {latest_round_in_csv} 回** （データ総数: {len(df_info)}件）")
 
-    # 🌟【引数追加】user_selected_set を渡して連動させる
+    # 🌟【修正】 user_selected_set 引数を渡してバックエンドと連動
     predicted_set, score_table, lucky_numbers, set_status_msg = generate_loto_predictions(
         csv_file, loto_type=loto_type, bias_numbers=bias_numbers, target_dow_str=loto6_dow, user_selected_set=user_selected_set
     )
@@ -496,13 +494,13 @@ else:
             st.subheader(f"📅 分析対象の曜日: {loto6_dow}")
             st.info(f"今回は **【 {loto6_dow} 】** の過去データに基づく曜日別相性を加味して分析しています。")
 
-        # 🔮 セット球の表示部分
+        # 🔮 修正したセット球の表示部分
         st.subheader("🔮 分析対象のセット球")
         if user_selected_set == "自動":
             st.info(f"AI自動予測されたセット球は **【 {predicted_set} セット 】** です。")
         else:
             st.success(f"ユーザー指定により **【 {predicted_set} セット 】** で固定分析中。")
-        st.caption(f"💡 【AI解析ステータス】  \\n{set_status_msg}")
+        st.caption(f"💡 【AI解析ステータス】  \n{set_status_msg}")
 
         st.subheader("📊 過去50回のグループ分け（ベース）")
         high_nums = score_table[score_table["グループ"] == "高頻度"].index.tolist()
