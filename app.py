@@ -12,7 +12,9 @@ from bs4 import BeautifulSoup
 # ==================================================
 def fetch_latest_sougaku_result(loto_type):
     """sougaku.com（ロト生活）から最新のロト結果を自動取得する"""
-    url = f"http://sougaku.com/{loto_type}/index.html"
+    # 🌟【修正】ミニロトの場合、サイトのURLディレクトリ名が "mini" になるため変換
+    url_type = "mini" if loto_type == "miniloto" else loto_type
+    url = f"http://sougaku.com/{url_type}/index.html"
     try:
         res = requests.get(url, timeout=10)
         # 文字化け対策
@@ -118,6 +120,9 @@ def fetch_latest_sougaku_result(loto_type):
 def append_result_to_csv(file_path, loto_type, result_dict):
     """取得した結果をCSVファイルの末尾に追記する"""
     df = pd.read_csv(file_path)
+    
+    # 🌟【修正】重複チェック用に開催回を確実に数値型にキャスト
+    df["開催回"] = pd.to_numeric(df["開催回"], errors='coerce')
     round_num = result_dict["round"]
 
     if round_num in df["開催回"].values:
@@ -218,7 +223,6 @@ def predict_next_set_ball_advanced(df):
 # ==================================================
 # 3. バックエンド（分析・予想ロジック）
 # ==================================================
-# 🌟【修正】引数に user_selected_set="自動" を追加して画面の選択を受け取れるように変更
 def generate_loto_predictions(file_path, loto_type="loto7", num_combinations=5, bias_numbers=None, target_dow_str=None, user_selected_set="自動"):
     config = {
         "loto7": {
@@ -248,24 +252,25 @@ def generate_loto_predictions(file_path, loto_type="loto7", num_combinations=5, 
     all_numbers = list(range(1, max_num + 1))
 
     df = pd.read_csv(file_path)
+    
+    # 🌟【修正】開催回を確実に数値型に変換してソート順の不具合を防ぐ
+    df["開催回"] = pd.to_numeric(df["開催回"], errors='coerce')
+    df = df.dropna(subset=["開催回"])
+    df["開催回"] = df["開催回"].astype(int)
     df = df.sort_values(by="開催回").reset_index(drop=True)
 
     hot_set, cold_set, set_status_msg = predict_next_set_ball_advanced(df)
     
-    # 🌟【修正】ユーザーの選択（自動 or 固定）に基づいた条件分岐ロジックを追加
     if user_selected_set == "自動":
         if hot_set in ["データなし", "分析不能"]:
-            # 解析できない場合のセーフティフォールバックとして従来の最少出現セットを使用
             recent_10_sets = df.tail(10)["セット"].value_counts().reindex(all_sets, fill_value=0)
             predicted_set = recent_10_sets.sort_values(ascending=True).index[0]
         else:
             predicted_set = hot_set
     else:
-        # 手動で選ばれた場合は指定されたセット球を強制適用
         predicted_set = user_selected_set
         set_status_msg = f"ユーザー指定により【 {user_selected_set} セット 】に固定して詳細分析を実行中"
 
-    # 出現回数の集計
     def count_occurrences(target_df):
         counts = pd.Series(target_df[main_cols].values.flatten()).value_counts()
         return counts.reindex(all_numbers, fill_value=0)
@@ -274,7 +279,6 @@ def generate_loto_predictions(file_path, loto_type="loto7", num_combinations=5, 
     res_10 = count_occurrences(df.tail(10))
     res_5 = count_occurrences(df.tail(5))
 
-    # セット球相性
     set_df = df[df["セット"] == predicted_set]
     total_set_used = len(set_df)
 
@@ -284,45 +288,39 @@ def generate_loto_predictions(file_path, loto_type="loto7", num_combinations=5, 
     else:
         set_rate = pd.Series(0, index=all_numbers)
 
-    # 総合スコアリング
     score_df = pd.DataFrame(index=all_numbers)
     score_df["過去50回スコア"] = res_50 * 1.0
     score_df["直近10回スコア"] = res_10 * 1.5
     score_df["直近5回スコア"] = res_5 * 2.0
     score_df["セット球相性スコア"] = set_rate * 0.3
 
-    # ロト6のみ：曜日別相性スコアの計算
     score_df["曜日別相性スコア"] = 0.0
     if loto_type == "loto6" and target_dow_str:
-        target_dow = 0 if target_dow_str == "月曜日" else 3  # 0=月曜, 3=木曜
+        target_dow = 0 if target_dow_str == "月曜日" else 3
         
         df_copy = df.copy()
         df_copy["datetime"] = pd.to_datetime(df_copy["日付"], errors='coerce')
         df_copy["dayofweek"] = df_copy["datetime"].dt.dayofweek
         
-        # 特定の曜日データのみを抽出
         dow_df = df_copy[df_copy["dayofweek"] == target_dow]
         total_dow_used = len(dow_df)
         
         if total_dow_used > 0:
             dow_counts = pd.Series(dow_df[main_cols].values.flatten()).value_counts()
             dow_rate = (dow_counts.reindex(all_numbers, fill_value=0) / total_dow_used) * 100
-            score_df["曜日別相性スコア"] = dow_rate * 0.25  # 曜日傾向の重み付け
+            score_df["曜日別相性スコア"] = dow_rate * 0.25
 
-    # ビアス式スコアは 3.0 固定
     bias_bonus = 3.0
     score_df["ビアス式スコア"] = 0.0
     if bias_numbers:
         valid_bias = [n for n in bias_numbers if n in all_numbers]
         score_df.loc[valid_bias, "ビアス式スコア"] = bias_bonus
 
-    # 総合スコアに「曜日別相性スコア」を合算
     score_df["総合スコア"] = (
         score_df["過去50回スコア"] + score_df["直近10回スコア"] + score_df["直近5回スコア"] + 
         score_df["セット球相性スコア"] + score_df["曜日別相性スコア"] + score_df["ビアス式スコア"]
     )
 
-    # グループ分け
     summary_df = score_df.sort_values(by="過去50回スコア", ascending=False)
     high_boundary = len(summary_df) // 3
     mid_boundary = (len(summary_df) // 3) * 2
@@ -330,7 +328,6 @@ def generate_loto_predictions(file_path, loto_type="loto7", num_combinations=5, 
     score_df.iloc[:high_boundary, score_df.columns.get_loc("グループ")] = "高頻度"
     score_df.iloc[high_boundary:mid_boundary, score_df.columns.get_loc("グループ")] = "中頻度"
 
-    # 予想組み合わせ生成
     scored_numbers = score_df.sort_values(by="総合スコア", ascending=False).index.tolist()
     predictions = []
     predictions.append(sorted(scored_numbers[:pick_num]))
@@ -364,7 +361,6 @@ st.sidebar.header("⚙️ システム設定")
 loto_type = st.sidebar.selectbox("分析するくじ種を選択", ("loto7", "loto6", "miniloto"))
 csv_file = f"{loto_type}_history.csv"
 
-# 🌟【追加】フロント画面にセット球の手動選択メニューを設置
 st.sidebar.subheader("🔮 セット球の指定")
 user_selected_set = st.sidebar.selectbox(
     "分析に使用するセット球を選択",
@@ -373,7 +369,6 @@ user_selected_set = st.sidebar.selectbox(
     help="『自動』にすると、過去の遷移から最適なセット球を自動予測します。特定のセット球に固定して相性を分析したい場合はアルファベットを選択してください。"
 )
 
-# ロト6専用の曜日選択パネル＆自動曜日推測
 loto6_dow = None
 if loto_type == "loto6" and os.path.exists(csv_file):
     try:
@@ -382,7 +377,6 @@ if loto_type == "loto6" and os.path.exists(csv_file):
         valid_dates = df_temp["datetime"].dropna()
         if not valid_dates.empty:
             latest_dow = valid_dates.iloc[-1].dayofweek
-            # 直近が月曜(0)なら次回は木曜(idx:1)、木曜(3)なら次回は月曜(idx:0)
             default_idx = 1 if latest_dow == 0 else 0
         else:
             default_idx = 0
@@ -397,7 +391,6 @@ if loto_type == "loto6" and os.path.exists(csv_file):
         help="直近のCSVデータから次回の抽選曜日を自動推測しています。手動で切り替えることも可能です。"
     )
 
-# 永続保存用のセッションキー管理
 for lt, default_val in [
     ("loto7", "06 07 08 09 10 11 12 16 17 18 20 21 22 23 24 26 27 28 29 31 32 33 34 36"),
     ("loto6", ""),
@@ -420,7 +413,6 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("📂 CSVデータの更新・追加")
 
 if os.path.exists(csv_file):
-    # ① 指定サイトから自動取得ボタン
     if st.sidebar.button("🌐 ロト生活サイトから最新結果を自動追加"):
         with st.spinner("sougaku.com から最新結果・セット球データを解析中..."):
             result_dict, error = fetch_latest_sougaku_result(loto_type)
@@ -435,10 +427,12 @@ if os.path.exists(csv_file):
                 else:
                     st.sidebar.warning(msg)
 
-    # ② バックアップ用：手動追加フォーム
     with st.sidebar.expander("📝 手動で結果を追加する"):
         df_temp = pd.read_csv(csv_file)
-        next_round = int(df_temp["開催回"].max() + 1) if len(df_temp) > 0 else 1
+        
+        # 🌟【修正】手動追加時の次回開催回の自動計算ロジックにも数値型安全処理を適用
+        df_temp["開催回"] = pd.to_numeric(df_temp["開催回"], errors='coerce')
+        next_round = int(df_temp["開催回"].max() + 1) if len(df_temp) > 0 and pd.notna(df_temp["開催回"].max()) else 1
 
         if len(df_temp) > 0 and "日付" in df_temp.columns:
             latest_date_val = str(df_temp["日付"].iloc[-1])
@@ -483,10 +477,17 @@ if not os.path.exists(csv_file):
     st.error(f"❌ ファイル `{csv_file}` が見つかりません。フォルダ内に配置してください。")
 else:
     df_info = pd.read_csv(csv_file)
-    latest_round_in_csv = df_info["開催回"].max()
+    
+    # 🌟【修正】画面表示用の最新回取得でも確実に数値型にキャストして安全に最大値を判定
+    df_info["開催回"] = pd.to_numeric(df_info["開催回"], errors='coerce')
+    latest_round_in_csv = df_info["開催回"].dropna().max()
+    if pd.notna(latest_round_in_csv):
+        latest_round_in_csv = int(latest_round_in_csv)
+    else:
+        latest_round_in_csv = 0
+        
     st.caption(f"現在のCSV内の最新データ：**第 {latest_round_in_csv} 回** （データ総数: {len(df_info)}件）")
 
-    # 🌟【修正】予想実行の引数に user_selected_set=user_selected_set を受け渡すように追加
     predicted_set, score_table, lucky_numbers, set_status_msg = generate_loto_predictions(
         csv_file, loto_type=loto_type, bias_numbers=bias_numbers, target_dow_str=loto6_dow, user_selected_set=user_selected_set
     )
@@ -494,12 +495,10 @@ else:
     col1, col2 = st.columns(2)
 
     with col1:
-        # ロト6の場合、適用している曜日設定をアナウンス
         if loto_type == "loto6" and loto6_dow:
             st.subheader(f"📅 分析対象の曜日: {loto6_dow}")
             st.info(f"今回は **【 {loto6_dow} 】** の過去データに基づく曜日別相性を加味して分析しています。")
 
-        # 🔮 修正したセット球の表示部分
         st.subheader("🔮 分析対象のセット球")
         if user_selected_set == "自動":
             st.info(f"AI自動予測されたセット球は **【 {predicted_set} セット 】** です。")
@@ -526,9 +525,8 @@ else:
                 st.write(f"第 {i} 予想 (対抗トレンド重視) ➔ {formatted_comb}")
 
     st.markdown("---")
-    st.subheader("📈 数字別の詳細分析スコア（総合点順）")
+    st.subheader("📈 数字別の詳細 analysis スコア（総合点順）")
     
-    # ロト6の時だけ「曜日別相性スコア」の列を表示に含める
     if loto_type == "loto6":
         st.dataframe(score_table[["総合スコア", "直近5回スコア", "セット球相性スコア", "曜日別相性スコア", "ビアス式スコア", "グループ"]])
     else:
