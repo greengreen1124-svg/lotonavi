@@ -12,7 +12,6 @@ from bs4 import BeautifulSoup
 # ==================================================
 def fetch_latest_sougaku_result(loto_type):
     """sougaku.com（ロト生活）から最新のロト結果を自動取得する"""
-    # 🌟【修正】ミニロトの場合、サイトのURLディレクトリ名が "mini" になるため変換
     url_type = "mini" if loto_type == "miniloto" else loto_type
     url = f"http://sougaku.com/{url_type}/index.html"
     try:
@@ -121,7 +120,7 @@ def append_result_to_csv(file_path, loto_type, result_dict):
     """取得した結果をCSVファイルの末尾に追記する"""
     df = pd.read_csv(file_path)
     
-    # 🌟【修正】重複チェック用に開催回を確実に数値型にキャスト
+    # 重複チェック用に開催回を確実に数値型にキャスト
     df["開催回"] = pd.to_numeric(df["開催回"], errors='coerce')
     round_num = result_dict["round"]
 
@@ -160,70 +159,80 @@ def append_result_to_csv(file_path, loto_type, result_dict):
 
 
 # ==================================================
-# 2. 相性遷移予測ロジック
+# 2. セット球予想ロジック (🌟app-3.pyのハイブリッドAI予測へリプレイス)
 # ==================================================
 def predict_next_set_ball_advanced(df):
-    """前回セット球の直後に出やすいセット球の相性を可変ウィンドウで解析する"""
-    if 'セット' not in df.columns or len(df) < 2:
-        return "データなし", "ー", "データ不足のため分析できません"
+    """app-3.pyのロジックに基づくセット球自動予測"""
+    if 'セット' not in df.columns or len(df) == 0:
+        return "C", "（※CSV内にセットデータがないため、Cセットを選択中）"
         
-    last_set = df['セット'].iloc[-1]
-    if pd.isna(last_set) or last_set == "未設定" or str(last_set).strip() == "":
-        return "データなし", "ー", "前回のセット球データが未設定です"
-
-    total_rows = len(df)
-    current_window = 50  
-    max_possible_window = total_rows - 1  
-
-    while True:
-        start_idx = max(0, total_rows - 1 - current_window)
-        sub_df = df.iloc[start_idx:]
+    set_history = []
+    for val in df['セット']:
+        m = re.search(r'([A-J_a-j])', str(val))
+        set_history.append(m.group(1).upper() if m else "C")
         
-        transitions = []
-        for i in range(len(sub_df) - 1):
-            if sub_df['セット'].iloc[i] == last_set:
-                next_val = sub_df['セット'].iloc[i+1]
-                if pd.notna(next_val) and str(next_val).strip() != "" and next_val != "未設定":
-                    transitions.append(next_val)
+    if len(set_history) > 5:
+        clean_sets = [s for s in set_history if s in list("ABCDEFGHIJ")]
+        if clean_sets:
+            current_set = clean_sets[-1]
+            transitions = []
+            for i in range(len(clean_sets) - 1):
+                if clean_sets[i] == current_set: 
+                    transitions.append(clean_sets[i+1])
                     
-        counts = {}
-        for s in transitions:
-            counts[s] = counts.get(s, 0) + 1
+            recent_sets = clean_sets[-30:]
+            set_counts = {letter: recent_sets.count(letter) for letter in list("ABCDEFGHIJ")}
+            least_frequent_sets = [k for k, v in set_counts.items() if v == min(set_counts.values())]
             
-        if not counts:
-            if current_window >= max_possible_window: break
-            current_window += 10
-            continue
-            
-        max_val = max(counts.values())
-        min_val = min(counts.values())
-        
-        hots = [k for k, v in counts.items() if v == max_val]
-        colds = [k for k, v in counts.items() if v == min_val]
-        
-        if (len(hots) == 1 and len(colds) == 1) or current_window >= max_possible_window:
-            break
-            
-        next_window = current_window + 10
-        if next_window > max_possible_window:
-            current_window = max_possible_window
+            if transitions:
+                predicted_set = max(set(transitions), key=transitions.count)
+                status_msg = f"直近【{current_set}】からの遷移確率MAX理論に基づく自動予測"
+            elif least_frequent_sets:
+                import random
+                predicted_set = random.choice(least_frequent_sets)
+                status_msg = f"直近30回の未出現ローテーション周期に基づく自動予測"
+            else:
+                predicted_set = "C"
+                status_msg = "自動予測が特定できなかったため、Cセットを選択中"
         else:
-            current_window = next_window
+            predicted_set = "C"
+            status_msg = "有効なセット記号(A-J)が検出されなかったため、Cセットを選択中"
+    else:
+        predicted_set = "C"
+        status_msg = "データ数が少なすぎるため、Cセットを選択中"
+        
+    return predicted_set, status_msg
 
-    if not counts:
-        return "分析不能", "ー", f"過去のデータに前回と同じ【{last_set}セット】の事例がありませんでした"
 
-    hot_set = hots[0]
-    cold_set = colds[0]
-
-    status_msg = f"前回【{last_set}セット】の直後傾向を解析（過去 {current_window} 回から自動判定）"
-    return hot_set, cold_set, status_msg
+# 🌟 JSONから指定されたCSVファイルの参照にロジックをリプレイス (app-3.pyより移植)
+def load_forecast(csv_filename):
+    delete_numbers = []
+    focus_numbers = []
+    if os.path.exists(csv_filename):
+        for encoding in ['utf-8', 'shift_jis']:
+            try:
+                with open(csv_filename, 'r', encoding=encoding) as f:
+                    for line in f:
+                        if '削除数字' in line:
+                            parts = line.strip().split(',')
+                            if len(parts) >= 2:
+                                val = parts[-1]
+                                delete_numbers = [int(n) for n in val.split() if n.isdigit()]
+                        elif '絞り込み数字' in line:
+                            parts = line.strip().split(',')
+                            if len(parts) >= 2:
+                                val = parts[-1]
+                                focus_numbers = [int(n) for n in val.split() if n.isdigit()]
+                break
+            except:
+                continue
+    return delete_numbers, focus_numbers
 
 
 # ==================================================
 # 3. バックエンド（分析・予想ロジック）
 # ==================================================
-def generate_loto_predictions(file_path, loto_type="loto7", num_combinations=5, bias_numbers=None, target_dow_str=None, user_selected_set="自動"):
+def generate_loto_predictions(file_path, loto_type="loto7", num_combinations=5, bias_numbers=None, delete_numbers=None, target_dow_str=None, user_selected_set="自動"):
     config = {
         "loto7": {
             "max_num": 37,
@@ -253,20 +262,15 @@ def generate_loto_predictions(file_path, loto_type="loto7", num_combinations=5, 
 
     df = pd.read_csv(file_path)
     
-    # 🌟【修正】開催回を確実に数値型に変換してソート順の不具合を防ぐ
+    # 開催回を確実に数値型に変換してソート順の不具合を防ぐ
     df["開催回"] = pd.to_numeric(df["開催回"], errors='coerce')
     df = df.dropna(subset=["開催回"])
     df["開催回"] = df["開催回"].astype(int)
     df = df.sort_values(by="開催回").reset_index(drop=True)
 
-    hot_set, cold_set, set_status_msg = predict_next_set_ball_advanced(df)
-    
+    # セット球自動判定
     if user_selected_set == "自動":
-        if hot_set in ["データなし", "分析不能"]:
-            recent_10_sets = df.tail(10)["セット"].value_counts().reindex(all_sets, fill_value=0)
-            predicted_set = recent_10_sets.sort_values(ascending=True).index[0]
-        else:
-            predicted_set = hot_set
+        predicted_set, set_status_msg = predict_next_set_ball_advanced(df)
     else:
         predicted_set = user_selected_set
         set_status_msg = f"ユーザー指定により【 {user_selected_set} セット 】に固定して詳細分析を実行中"
@@ -310,11 +314,15 @@ def generate_loto_predictions(file_path, loto_type="loto7", num_combinations=5, 
             dow_rate = (dow_counts.reindex(all_numbers, fill_value=0) / total_dow_used) * 100
             score_df["曜日別相性スコア"] = dow_rate * 0.25
 
+    # 🌟 ビアス式加減点システム
     bias_bonus = 3.0
     score_df["ビアス式スコア"] = 0.0
     if bias_numbers:
         valid_bias = [n for n in bias_numbers if n in all_numbers]
-        score_df.loc[valid_bias, "ビアス式スコア"] = bias_bonus
+        score_df.loc[valid_bias, "ビアス式スコア"] += bias_bonus
+    if delete_numbers:
+        valid_delete = [n for n in delete_numbers if n in all_numbers]
+        score_df.loc[valid_delete, "ビアス式スコア"] -= bias_bonus  # 削除数字に対してマイナス加点
 
     score_df["総合スコア"] = (
         score_df["過去50回スコア"] + score_df["直近10回スコア"] + score_df["直近5回スコア"] + 
@@ -391,22 +399,34 @@ if loto_type == "loto6" and os.path.exists(csv_file):
         help="直近のCSVデータから次回の抽選曜日を自動推測しています。手動で切り替えることも可能です。"
     )
 
-for lt, default_val in [
-    ("loto7", "06 07 08 09 10 11 12 16 17 18 20 21 22 23 24 26 27 28 29 31 32 33 34 36"),
-    ("loto6", ""),
-    ("miniloto", "")
-]:
-    if f"permanent_bias_{lt}" not in st.session_state:
-        st.session_state[f"permanent_bias_{lt}"] = default_val
+# 🌟【変更】外部CSVファイルからのビアス式数字の自動連動管理処理
+bias_file = f"{loto_type}_bias.csv"
+saved_delete_nums, saved_focus_nums = load_forecast(bias_file)
+
+if f"permanent_bias_{loto_type}" not in st.session_state or st.session_state[f"permanent_bias_{loto_type}"] == "":
+    st.session_state[f"permanent_bias_{loto_type}"] = " ".join([f"{n:02d}" for n in saved_focus_nums])
+
+if f"permanent_delete_{loto_type}" not in st.session_state or st.session_state[f"permanent_delete_{loto_type}"] == "":
+    st.session_state[f"permanent_delete_{loto_type}"] = " ".join([f"{n:02d}" for n in saved_delete_nums])
 
 st.sidebar.subheader("🔮 ビアス式 絞り込み数字")
 bias_input = st.sidebar.text_area(
     f"{loto_type.upper()} の絞り込み数字を入力：",
     value=st.session_state[f"permanent_bias_{loto_type}"],
-    help="対象URL of 『ビアス式絞り込み予想』の下にある数字をコピーして貼り付けてください。",
+    help="対応するCSVファイルから自動読込されています。画面上で編集して一時反映することも可能です。",
 )
 st.session_state[f"permanent_bias_{loto_type}"] = bias_input
 bias_numbers = [int(s) for s in re.findall(r"\d+", bias_input)]
+
+st.sidebar.subheader("❌ ビアス式 削除数字")
+delete_input = st.sidebar.text_area(
+    f"{loto_type.upper()} の削除数字を入力：",
+    value=st.session_state[f"permanent_delete_{loto_type}"],
+    help="対応するCSVファイルから自動読込されています。画面上で編集して一時反映することも可能です。",
+)
+st.session_state[f"permanent_delete_{loto_type}"] = delete_input
+delete_numbers = [int(s) for s in re.findall(r"\d+", delete_input)]
+
 
 # データ更新パネル
 st.sidebar.markdown("---")
@@ -423,6 +443,7 @@ if os.path.exists(csv_file):
                 if success:
                     st.sidebar.success(msg)
                     st.session_state[f"permanent_bias_{loto_type}"] = ""
+                    st.session_state[f"permanent_delete_{loto_type}"] = ""
                     st.rerun()
                 else:
                     st.sidebar.warning(msg)
@@ -430,7 +451,7 @@ if os.path.exists(csv_file):
     with st.sidebar.expander("📝 手動で結果を追加する"):
         df_temp = pd.read_csv(csv_file)
         
-        # 🌟【修正】手動追加時の次回開催回の自動計算ロジックにも数値型安全処理を適用
+        # 手動追加時の次回開催回の自動計算ロジックにも数値型安全処理を適用
         df_temp["開催回"] = pd.to_numeric(df_temp["開催回"], errors='coerce')
         next_round = int(df_temp["開催回"].max() + 1) if len(df_temp) > 0 and pd.notna(df_temp["開催回"].max()) else 1
 
@@ -467,6 +488,7 @@ if os.path.exists(csv_file):
                 if success:
                     st.success(msg)
                     st.session_state[f"permanent_bias_{loto_type}"] = ""
+                    st.session_state[f"permanent_delete_{loto_type}"] = ""
                     st.rerun()
                 else:
                     st.warning(msg)
@@ -478,7 +500,7 @@ if not os.path.exists(csv_file):
 else:
     df_info = pd.read_csv(csv_file)
     
-    # 🌟【修正】画面表示用の最新回取得でも確実に数値型にキャストして安全に最大値を判定
+    # 画面表示用の最新回取得でも確実に数値型にキャストして安全に最大値を判定
     df_info["開催回"] = pd.to_numeric(df_info["開催回"], errors='coerce')
     latest_round_in_csv = df_info["開催回"].dropna().max()
     if pd.notna(latest_round_in_csv):
@@ -489,7 +511,7 @@ else:
     st.caption(f"現在のCSV内の最新データ：**第 {latest_round_in_csv} 回** （データ総数: {len(df_info)}件）")
 
     predicted_set, score_table, lucky_numbers, set_status_msg = generate_loto_predictions(
-        csv_file, loto_type=loto_type, bias_numbers=bias_numbers, target_dow_str=loto6_dow, user_selected_set=user_selected_set
+        csv_file, loto_type=loto_type, bias_numbers=bias_numbers, delete_numbers=delete_numbers, target_dow_str=loto6_dow, user_selected_set=user_selected_set
     )
 
     col1, col2 = st.columns(2)
@@ -505,6 +527,16 @@ else:
         else:
             st.success(f"ユーザー指定により **【 {predicted_set} セット 】** で固定分析中。")
         st.caption(f"💡 【AI解析ステータス】  \n{set_status_msg}")
+
+        # 🌟 CSVから検出された外部予想データの確認用インジケータ
+        st.subheader("📡 連動中の外部予想データ（ビアス式）")
+        c_del, c_foc = st.columns(2)
+        with c_del:
+            st.markdown("❌ **削除数字:**")
+            st.write(" ".join([f"[{n:02d}]" for n in sorted(delete_numbers)]) if delete_numbers else "なし")
+        with c_foc:
+            st.markdown("🎯 **絞り込み数字:**")
+            st.write(" ".join([f"[{n:02d}]" for n in sorted(bias_numbers)]) if bias_numbers else "なし")
 
         st.subheader("📊 過去50回のグループ分け（ベース）")
         high_nums = score_table[score_table["グループ"] == "高頻度"].index.tolist()
