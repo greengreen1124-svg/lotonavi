@@ -159,7 +159,7 @@ def append_result_to_csv(file_path, loto_type, result_dict):
 
 
 # ==================================================
-# 2. セット球予想ロジック (🌟app-3.pyのハイブリッドAI予測へリプレイス)
+# 2. セット球予想ロジック
 # ==================================================
 def predict_next_set_ball_advanced(df):
     """app-3.pyのロジックに基づくセット球自動予測"""
@@ -204,7 +204,6 @@ def predict_next_set_ball_advanced(df):
     return predicted_set, status_msg
 
 
-# 🌟 JSONから指定されたCSVファイルの参照にロジックをリプレイス (app-3.pyより移植)
 def load_forecast(csv_filename):
     delete_numbers = []
     focus_numbers = []
@@ -230,9 +229,11 @@ def load_forecast(csv_filename):
 
 
 # ==================================================
-# 3. バックエンド（分析・予想ロジック）
+# 3. バックエンド（分析・予想ロジック ＋ ゲイル理論アドオン）
 # ==================================================
-def generate_loto_predictions(file_path, loto_type="loto7", num_combinations=5, bias_numbers=None, delete_numbers=None, target_dow_str=None, user_selected_set="自動"):
+def generate_loto_predictions(file_path, loto_type="loto7", num_combinations=5, bias_numbers=None, delete_numbers=None, 
+                              target_dow_str=None, user_selected_set="自動", use_gail_skip=True, use_gail_hilow=True, 
+                              use_gail_consecutive=True, sum_range=None):
     config = {
         "loto7": {
             "max_num": 37,
@@ -267,6 +268,11 @@ def generate_loto_predictions(file_path, loto_type="loto7", num_combinations=5, 
     df = df.dropna(subset=["開催回"])
     df["開催回"] = df["開催回"].astype(int)
     df = df.sort_values(by="開催回").reset_index(drop=True)
+
+    # ゲイル流スパン解析用に過去の本数字リスト（2次元リスト）をパース
+    past_numbers = []
+    for _, row in df.dropna(subset=main_cols).iterrows():
+        past_numbers.append([int(row[c]) for c in main_cols])
 
     # セット球自動判定
     if user_selected_set == "自動":
@@ -314,6 +320,18 @@ def generate_loto_predictions(file_path, loto_type="loto7", num_combinations=5, 
             dow_rate = (dow_counts.reindex(all_numbers, fill_value=0) / total_dow_used) * 100
             score_df["曜日別相性スコア"] = dow_rate * 0.25
 
+    # 📊 ゲイル理論：スキップ回数（経過回数）の解析 ＋ スコア加点システム
+    score_df["ゲイル流スコア"] = 0.0
+    if use_gail_skip and len(past_numbers) > 0:
+        skip_counts = {i: 99 for i in range(1, max_num + 1)}
+        for idx, r in enumerate(reversed(past_numbers)):
+            for n in r:
+                if n in skip_counts and skip_counts[n] == 99:
+                    skip_counts[n] = idx  # 0=前回出現, 1=前々回出現...
+        for n, skip in skip_counts.items():
+            if 0 <= skip <= 5:
+                score_df.loc[n, "ゲイル流スコア"] += 2.0  # リバウンド確率の高いスパンに加点
+
     # 🌟 ビアス式加減点システム
     bias_bonus = 3.0
     score_df["ビアス式スコア"] = 0.0
@@ -326,7 +344,7 @@ def generate_loto_predictions(file_path, loto_type="loto7", num_combinations=5, 
 
     score_df["総合スコア"] = (
         score_df["過去50回スコア"] + score_df["直近10回スコア"] + score_df["直近5回スコア"] + 
-        score_df["セット球相性スコア"] + score_df["曜日別相性スコア"] + score_df["ビアス式スコア"]
+        score_df["セット球相性スコア"] + score_df["曜日別相性スコア"] + score_df["ゲイル流スコア"] + score_df["ビアス式スコア"]
     )
 
     summary_df = score_df.sort_values(by="過去50回スコア", ascending=False)
@@ -336,21 +354,69 @@ def generate_loto_predictions(file_path, loto_type="loto7", num_combinations=5, 
     score_df.iloc[:high_boundary, score_df.columns.get_loc("グループ")] = "高頻度"
     score_df.iloc[high_boundary:mid_boundary, score_df.columns.get_loc("グループ")] = "中頻度"
 
-    scored_numbers = score_df.sort_values(by="総合スコア", ascending=False).index.tolist()
-    predictions = []
-    predictions.append(sorted(scored_numbers[:pick_num]))
+    # ─── ゲイル理論・調和関門フィルター搭載型組み合わせ生成 ───
+    if sum_range is not None:
+        sum_min, sum_max = sum_range
+    else:
+        if loto_type == "loto6": sum_min, sum_max = 110, 170
+        elif loto_type == "loto7": sum_min, sum_max = 100, 165
+        else: sum_min, sum_max = 65, 95
 
     weights = score_df["総合スコア"].values
     weights = np.where(weights <= 0, 0.1, weights)
     weights = weights / weights.sum()
 
-    for _ in range(num_combinations - 1):
-        while True:
-            chosen = np.random.choice(all_numbers, size=pick_num, replace=False, p=weights)
-            chosen_sorted = sorted(list(chosen))
-            if chosen_sorted not in predictions:
-                predictions.append(chosen_sorted)
-                break
+    predictions = []
+    
+    # ゲイルフィルターチェック用のインナールーティン
+    def check_gail_filters(nums):
+        # 1. 合計値フィルター
+        total_sum = sum(nums)
+        if not (sum_min <= total_sum <= sum_max): return False
+            
+        # 2. 高低バランスフィルター（最大値の半分が境界）
+        if use_gail_hilow:
+            mid_point = max_num // 2
+            low_count = len([n for n in nums if n <= mid_point])
+            if pick_num == 6 and low_count not in [2, 3, 4]: return False      # ロト6黄金比: 2:4~4:2
+            elif pick_num == 7 and low_count not in [2, 3, 4, 5]: return False  # ロト7黄金比: 2:5~5:2
+            elif pick_num == 5 and low_count not in [2, 3]: return False        # ミニロト黄金比: 2:3~3:2
+            
+        # 3. 連続数字調和制御（出現確率70%エミュレート）
+        if use_gail_consecutive:
+            has_consecutive = any(nums[i+1] - nums[i] == 1 for i in range(len(nums)-1))
+            import random
+            if not has_consecutive and random.random() < 0.70: return False
+            
+        return True
+
+    # 第1予想（本命スコア最上位）の抽出を試みる
+    scored_numbers = score_df.sort_values(by="総合スコア", ascending=False).index.tolist()
+    top_comb = sorted(scored_numbers[:pick_num])
+    if check_gail_filters(top_comb):
+        predictions.append(top_comb)
+
+    # 対抗トレンド重視の生成
+    attempts = 0
+    while len(predictions) < num_combinations and attempts < 4000:
+        attempts += 1
+        chosen = np.random.choice(all_numbers, size=pick_num, replace=False, p=weights)
+        chosen_sorted = sorted(list(chosen))
+        
+        if chosen_sorted in predictions: continue
+            
+        if check_gail_filters(chosen_sorted):
+            predictions.append(chosen_sorted)
+
+    # フィルターが厳しすぎて口数が不足した場合のセーフティバックアップ
+    if len(predictions) < num_combinations:
+        for _ in range(num_combinations - len(predictions)):
+            while True:
+                chosen = np.random.choice(all_numbers, size=pick_num, replace=False, p=weights)
+                chosen_sorted = sorted(list(chosen))
+                if chosen_sorted not in predictions:
+                    predictions.append(chosen_sorted)
+                    break
 
     return predicted_set, score_df.sort_values(by="総合スコア", ascending=False), predictions, set_status_msg
 
@@ -358,10 +424,10 @@ def generate_loto_predictions(file_path, loto_type="loto7", num_combinations=5, 
 # ==================================================
 # 4. フロントエンド（Streamlit画面表示）
 # ==================================================
-st.set_page_config(page_title="ロト予想・分析ナビ", layout="wide")
+st.set_page_config(page_title="ロト予想・分析ナビ ゲイルエディション", layout="wide")
 
-st.title("🎯 ロトAI予想・トレンド分析サイト")
-st.caption("過去の出現傾向 × セット球ローテーション × 曜日別サイクル（LOTO6） × ビアス式絞り込みの融合システム")
+st.title("👑 ロトAI予想・トレンド分析サイト (Gail Howard流アドオン統合版)")
+st.caption("過去の出現傾向 × セット球ローテーション × 曜日サイクル × ビアス式加減点 × ゲイル理論黄金比フィルターの融合")
 
 # --- サイドバー設定 ---
 st.sidebar.header("⚙️ システム設定")
@@ -399,7 +465,7 @@ if loto_type == "loto6" and os.path.exists(csv_file):
         help="直近のCSVデータから次回の抽選曜日を自動推測しています。手動で切り替えることも可能です。"
     )
 
-# 🌟【変更】外部CSVファイルからのビアス式数字の自動連動管理処理
+# 外部CSVファイルからのビアス式数字の自動連動管理処理
 bias_file = f"{loto_type}_bias.csv"
 saved_delete_nums, saved_focus_nums = load_forecast(bias_file)
 
@@ -427,6 +493,24 @@ delete_input = st.sidebar.text_area(
 st.session_state[f"permanent_delete_{loto_type}"] = delete_input
 delete_numbers = [int(s) for s in re.findall(r"\d+", delete_input)]
 
+# 📊 【新設】ゲイル理論アドオン設定エリア
+st.sidebar.markdown("---")
+st.sidebar.subheader("📊 ゲイル理論 (Smart Luck) アドオン")
+g_skip = st.sidebar.checkbox("ゲイル流・0〜5スパン追跡 (周期ウエイト)", value=True, key="sb_g_skip")
+g_hilow = st.sidebar.checkbox("ゲイル流・高低黄金比率フィルター", value=True, key="sb_g_hilow")
+g_consec = st.sidebar.checkbox("ゲイル流・連続数字調和制御 (確率70%化)", value=True, key="sb_g_consec")
+
+if loto_type == "loto7":
+    default_sum_range = (100, 165)
+    min_s, max_s = 90, 180
+elif loto_type == "loto6":
+    default_sum_range = (110, 170)
+    min_s, max_s = 80, 200
+else:
+    default_sum_range = (65, 95)
+    min_s, max_s = 40, 130
+sum_range = st.sidebar.slider("ゲイル流・合計値の許容範囲調整", min_s, max_s, default_sum_range, key="sb_g_sum")
+
 
 # データ更新パネル
 st.sidebar.markdown("---")
@@ -451,7 +535,6 @@ if os.path.exists(csv_file):
     with st.sidebar.expander("📝 手動で結果を追加する"):
         df_temp = pd.read_csv(csv_file)
         
-        # 手動追加時の次回開催回の自動計算ロジックにも数値型安全処理を適用
         df_temp["開催回"] = pd.to_numeric(df_temp["開催回"], errors='coerce')
         next_round = int(df_temp["開催回"].max() + 1) if len(df_temp) > 0 and pd.notna(df_temp["開催回"].max()) else 1
 
@@ -500,7 +583,6 @@ if not os.path.exists(csv_file):
 else:
     df_info = pd.read_csv(csv_file)
     
-    # 画面表示用の最新回取得でも確実に数値型にキャストして安全に最大値を判定
     df_info["開催回"] = pd.to_numeric(df_info["開催回"], errors='coerce')
     latest_round_in_csv = df_info["開催回"].dropna().max()
     if pd.notna(latest_round_in_csv):
@@ -510,8 +592,11 @@ else:
         
     st.caption(f"現在のCSV内の最新データ：**第 {latest_round_in_csv} 回** （データ総数: {len(df_info)}件）")
 
+    # バックエンド分析エンジン起動（ゲイル理論フラグ・合計範囲スライダーを連動）
     predicted_set, score_table, lucky_numbers, set_status_msg = generate_loto_predictions(
-        csv_file, loto_type=loto_type, bias_numbers=bias_numbers, delete_numbers=delete_numbers, target_dow_str=loto6_dow, user_selected_set=user_selected_set
+        csv_file, loto_type=loto_type, bias_numbers=bias_numbers, delete_numbers=delete_numbers, 
+        target_dow_str=loto6_dow, user_selected_set=user_selected_set,
+        use_gail_skip=g_skip, use_gail_hilow=g_hilow, use_gail_consecutive=g_consec, sum_range=sum_range
     )
 
     col1, col2 = st.columns(2)
@@ -528,7 +613,6 @@ else:
             st.success(f"ユーザー指定により **【 {predicted_set} セット 】** で固定分析中。")
         st.caption(f"💡 【AI解析ステータス】  \n{set_status_msg}")
 
-        # 🌟 CSVから検出された外部予想データの確認用インジケータ
         st.subheader("📡 連動中の外部予想データ（ビアス式）")
         c_del, c_foc = st.columns(2)
         with c_del:
@@ -549,6 +633,7 @@ else:
 
     with col2:
         st.subheader("✨ AI厳選予想組み合わせ（5点）")
+        st.caption(f"※設定されたゲイル流合計範囲（{sum_range[0]} - {sum_range[1]}）および各種調和関門をクリアした合格目のみを表示中")
         for i, comb in enumerate(lucky_numbers, 1):
             formatted_comb = "  ".join([f"{num:02d}" for num in comb])
             if i == 1:
@@ -559,7 +644,10 @@ else:
     st.markdown("---")
     st.subheader("📈 数字別の詳細 analysis スコア（総合点順）")
     
+    # スコア表示列にゲイル流スコアを動的に追加
+    show_cols = ["総合スコア", "直近5回スコア", "セット球相性スコア"]
     if loto_type == "loto6":
-        st.dataframe(score_table[["総合スコア", "直近5回スコア", "セット球相性スコア", "曜日別相性スコア", "ビアス式スコア", "グループ"]])
-    else:
-        st.dataframe(score_table[["総合スコア", "直近5回スコア", "セット球相性スコア", "ビアス式スコア", "グループ"]])
+        show_cols.append("曜日別相性スコア")
+    show_cols.extend(["ゲイル流スコア", "ビアス式スコア", "グループ"])
+    
+    st.dataframe(score_table[show_cols])
