@@ -13,7 +13,7 @@ from collections import Counter
 # ==================================================
 st.set_page_config(page_title="ロトAI予想・トレンド分析サイト", page_icon="🎰", layout="wide")
 st.title("👑 ロトAI予想・トレンド分析サイト")
-st.subheader("Gail Howard流アドオン ＆ 横型 bias.csv ＆ 過去50回スコア分析 統合システム")
+st.subheader("Gail Howard流アドオン ＆ 横型 bias.csv ＆ 全数字詳細スコア表 統合システム")
 
 loto_type = st.sidebar.selectbox("予測するくじ種を選択", ["ロト6", "ロト7", "ミニロト"])
 
@@ -112,18 +112,17 @@ else:
 score_table = pd.DataFrame(index=range(1, max_num + 1))
 score_table["出現回数"] = 0
 score_table["グループ"] = "中頻度"
+score_table["バイアス設定"] = "通常"
 
 if os.path.exists(history_file):
     try:
         try: df_hist = pd.read_csv(history_file, encoding="utf-8")
         except: df_hist = pd.read_csv(history_file, encoding="shift_jis")
         
-        # 本数字の列を自動抽出
         num_cols = [c for c in df_hist.columns if "第" in c and "数字" in c and "BONUS" not in c and "ボーナス" not in c]
         if not num_cols:
-            num_cols = df_hist.columns[2:2+pick_num] # フォールバック
+            num_cols = df_hist.columns[2:2+pick_num]
             
-        # 直近50回を対象に集計
         df_recent = df_hist.head(50)
         all_past_nums = []
         for col in num_cols:
@@ -133,7 +132,7 @@ if os.path.exists(history_file):
         for n in range(1, max_num + 1):
             score_table.at[n, "出現回数"] = counts.get(n, 0)
             
-        # 頻度によるグループ分けの境界値を計算
+        # 頻度によるグループ分け
         q_high = score_table["出現回数"].quantile(0.7)
         q_low = score_table["出現回数"].quantile(0.3)
         
@@ -145,6 +144,13 @@ if os.path.exists(history_file):
         score_table["グループ"] = score_table.apply(assign_group, axis=1)
     except Exception as e:
         st.sidebar.error(f"⚠️ 過去履歴の集計中にエラーが発生しました: {e}")
+
+# 各数字のバイアス設定ステータスをマッピング
+for n in range(1, max_num + 1):
+    if n in delete_numbers:
+        score_table.at[n, "バイアス設定"] = "❌ 削除数字"
+    elif n in bias_numbers:
+        score_table.at[n, "バイアス設定"] = "🎯 絞り込み数字"
 
 # ==================================================
 # 4. ゲイル理論 フィルター関数
@@ -195,8 +201,7 @@ with col1:
         st.markdown("🎯 **絞り込み数字 (出現確率アップ):**")
         st.code(" ".join([f"[{n:02d}]" for n in sorted(bias_numbers)]) if bias_numbers else "なし")
 
-    # 📊 【復活】スコア表グループ分け表示セクション
-    st.markdown("### 📈 過去50回のグループ分け（出現頻度）")
+    st.markdown("### 📈 過去50回のグループ分け簡易要約")
     high_nums = score_table[score_table["グループ"] == "高頻度"].index.tolist()
     mid_nums = score_table[score_table["グループ"] == "中頻度"].index.tolist()
     low_nums = score_table[score_table["グループ"] == "低頻度"].index.tolist()
@@ -204,6 +209,14 @@ with col1:
     st.success(f"**【高頻度（ホット）】** {', '.join([f'{n:02d}' for n in high_nums])}")
     st.warning(f"**【中頻度（ミドル）】** {', '.join([f'{n:02d}' for n in mid_nums])}")
     st.error(f"**【低頻度（コールド）】** {', '.join([f'{n:02d}' for n in low_nums])}")
+
+    # 📊 【完全復活】全数字の詳細スコア内訳表セクション
+    st.markdown("### 📋 全数字のスコア・ステータス詳細内訳表")
+    display_table = score_table.copy()
+    display_table.index.name = "数字"
+    # インデックスを「01, 02...」と綺麗に見せるための整形をして表示
+    display_table.index = [f"{i:02d}" for i in display_table.index]
+    st.dataframe(display_table, use_container_width=True, height=400)
 
     st.markdown("### 🧬 ゲイル理論 (Smart Luck) アドオン設定")
     use_gail_hilow = st.checkbox("ゲイル流・高低黄金比率フィルターを有効化", value=True)
@@ -218,13 +231,11 @@ with col2:
     if not pool_numbers:
         st.error("⚠️ 有効な数字のプールが空です。")
     else:
-        # 過去50回の出現回数をベースの重み（最低値1）にする
         base_weights = {}
         for n in pool_numbers:
             past_count = score_table.at[n, "出現回数"] if n in score_table.index else 0
             base_weights[n] = max(1, past_count)
             
-        # 🎯 CSVの「絞り込み数字」の出現確率（ウエイト）をさらに5倍に強化
         for n in pool_numbers:
             if n in bias_numbers:
                 base_weights[n] *= 5
