@@ -6,13 +6,14 @@ import pandas as pd
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
+from collections import Counter
 
 # ==================================================
-# ページ設定（ゲイル理論＋特殊バイアスCSV完全解析版）
+# ページ設定
 # ==================================================
 st.set_page_config(page_title="ロトAI予想・トレンド分析サイト", page_icon="🎰", layout="wide")
 st.title("👑 ロトAI予想・トレンド分析サイト")
-st.subheader("Gail Howard流アドオン ＆ 横型 bias.csv 特殊フォーマット対応システム")
+st.subheader("Gail Howard流アドオン ＆ 横型 bias.csv ＆ 過去50回スコア分析 統合システム")
 
 loto_type = st.sidebar.selectbox("予測するくじ種を選択", ["ロト6", "ロト7", "ミニロト"])
 
@@ -84,47 +85,74 @@ delete_numbers = []
 
 if os.path.exists(bias_file):
     try:
-        # 特殊な行単位のテキストとしてCSVを読み込む
         with open(bias_file, mode="r", encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
-        
         for line in lines:
             line_str = line.strip()
-            if not line_str:
-                continue
-                
-            # カンマで分割 (例: ['削除数字', '04 25 26 29 30 37'])
+            if not line_str: continue
             parts = line_str.split(",", 1)
-            if len(parts) < 2:
-                continue
-                
+            if len(parts) < 2: continue
             header_name = parts[0].strip()
             numbers_str = parts[1].strip()
-            
-            # スペース等で区切られた数字文字列を整数のリストに変換
             extracted_nums = [int(n) for n in re.findall(r'\d+', numbers_str)]
             
             if "削除" in header_name or "delete" in header_name.lower():
                 delete_numbers = extracted_nums
             elif "絞り込み" in header_name or "注目" in header_name or "bias" in header_name.lower():
                 bias_numbers = extracted_nums
-                
-        st.sidebar.success(f"📂 設定ファイル `{bias_file}` を解析・適用しました。")
+        st.sidebar.success(f"📂 設定ファイル `{bias_file}` を適用しました。")
     except Exception as e:
-        st.sidebar.error(f"⚠️ `{bias_file}` の解析中にエラーが発生しました: {e}")
+        st.sidebar.error(f"⚠️ `{bias_file}` 解析エラー: {e}")
 else:
-    st.sidebar.warning(f"⚠️ 該当する設定ファイル `{bias_file}` がリポジトリ内に見つかりません。")
+    st.sidebar.warning(f"⚠️ `{bias_file}` が見つかりません。")
 
 # ==================================================
-# 3. ゲイル理論 フィルター関数
+# 3. 過去50回の履歴データから出現頻度（スコア）を集計
+# ==================================================
+score_table = pd.DataFrame(index=range(1, max_num + 1))
+score_table["出現回数"] = 0
+score_table["グループ"] = "中頻度"
+
+if os.path.exists(history_file):
+    try:
+        try: df_hist = pd.read_csv(history_file, encoding="utf-8")
+        except: df_hist = pd.read_csv(history_file, encoding="shift_jis")
+        
+        # 本数字の列を自動抽出
+        num_cols = [c for c in df_hist.columns if "第" in c and "数字" in c and "BONUS" not in c and "ボーナス" not in c]
+        if not num_cols:
+            num_cols = df_hist.columns[2:2+pick_num] # フォールバック
+            
+        # 直近50回を対象に集計
+        df_recent = df_hist.head(50)
+        all_past_nums = []
+        for col in num_cols:
+            all_past_nums.extend(df_recent[col].dropna().astype(int).tolist())
+            
+        counts = Counter(all_past_nums)
+        for n in range(1, max_num + 1):
+            score_table.at[n, "出現回数"] = counts.get(n, 0)
+            
+        # 頻度によるグループ分けの境界値を計算
+        q_high = score_table["出現回数"].quantile(0.7)
+        q_low = score_table["出現回数"].quantile(0.3)
+        
+        def assign_group(row):
+            if row["出現回数"] >= q_high: return "高頻度"
+            elif row["出現回数"] <= q_low: return "低頻度"
+            return "中頻度"
+            
+        score_table["グループ"] = score_table.apply(assign_group, axis=1)
+    except Exception as e:
+        st.sidebar.error(f"⚠️ 過去履歴の集計中にエラーが発生しました: {e}")
+
+# ==================================================
+# 4. ゲイル理論 フィルター関数
 # ==================================================
 def check_gail_filters(comb, loto_kind, use_hilow, use_consec):
-    if loto_kind == "ロト6":
-        mid = 22
-    elif loto_kind == "ロト7":
-        mid = 18
-    else:  # ミニロト
-        mid = 15
+    if loto_kind == "ロト6": mid = 22
+    elif loto_kind == "ロト7": mid = 18
+    else: mid = 15
         
     low_count = len([n for n in comb if n <= mid])
     
@@ -138,13 +166,12 @@ def check_gail_filters(comb, loto_kind, use_hilow, use_consec):
         for i in range(len(comb) - 1):
             if comb[i+1] - comb[i] == 1:
                 consec_pairs += 1
-        if consec_pairs > 1:
-            return False
+        if consec_pairs > 1: return False
             
     return True
 
 # ==================================================
-# 4. メイン画面レイアウト
+# 5. メイン画面レイアウト
 # ==================================================
 latest_info = fetch_latest_sougaku_result(loto_type)
 
@@ -157,16 +184,26 @@ with col1:
         st.write(f"🏆 **前回（最新）の本数字出目:** 第 **{latest_info['round']}** 回 （セット球: **{latest_info['set']}**）")
         st.code("  ".join([f"{num:02d}" for num in sorted(latest_info['numbers'])]))
     else:
-        st.error(f"⚠️ 最新結果の自動スクレイピングに失敗しました: {latest_info.get('msg')}")
+        st.error(f"⚠️ 最新結果取得失敗: {latest_info.get('msg')}")
         
     st.markdown("### 🎯 CSV参照結果（ビアス式数字）")
     c_del, c_foc = st.columns(2)
     with c_del:
-        st.markdown("❌ **削除数字 (プールから完全除外):**")
+        st.markdown("❌ **削除数字 (完全除外):**")
         st.code(" ".join([f"[{n:02d}]" for n in sorted(delete_numbers)]) if delete_numbers else "なし")
     with c_foc:
         st.markdown("🎯 **絞り込み数字 (出現確率アップ):**")
         st.code(" ".join([f"[{n:02d}]" for n in sorted(bias_numbers)]) if bias_numbers else "なし")
+
+    # 📊 【復活】スコア表グループ分け表示セクション
+    st.markdown("### 📈 過去50回のグループ分け（出現頻度）")
+    high_nums = score_table[score_table["グループ"] == "高頻度"].index.tolist()
+    mid_nums = score_table[score_table["グループ"] == "中頻度"].index.tolist()
+    low_nums = score_table[score_table["グループ"] == "低頻度"].index.tolist()
+
+    st.success(f"**【高頻度（ホット）】** {', '.join([f'{n:02d}' for n in high_nums])}")
+    st.warning(f"**【中頻度（ミドル）】** {', '.join([f'{n:02d}' for n in mid_nums])}")
+    st.error(f"**【低頻度（コールド）】** {', '.join([f'{n:02d}' for n in low_nums])}")
 
     st.markdown("### 🧬 ゲイル理論 (Smart Luck) アドオン設定")
     use_gail_hilow = st.checkbox("ゲイル流・高低黄金比率フィルターを有効化", value=True)
@@ -176,22 +213,24 @@ with col1:
 with col2:
     st.header("🔮 AI厳選予想組み合わせ（5点）")
     
-    # 削除数字を除外したベースとなる数字のプールを作成
     pool_numbers = [n for n in range(1, max_num + 1) if n not in delete_numbers]
     
     if not pool_numbers:
-        st.error("⚠️ 削除数字が多すぎるか、有効な数字のプールが空です。")
+        st.error("⚠️ 有効な数字のプールが空です。")
     else:
-        # すべての数字の初期出現重みを一律「10」に設定
-        base_counts = {n: 10 for n in pool_numbers}
-        
-        # 🎯 【重要】CSVから読み込んだ「絞り込み数字」の出現確率（ウエイト）を5倍に大幅強化
+        # 過去50回の出現回数をベースの重み（最低値1）にする
+        base_weights = {}
+        for n in pool_numbers:
+            past_count = score_table.at[n, "出現回数"] if n in score_table.index else 0
+            base_weights[n] = max(1, past_count)
+            
+        # 🎯 CSVの「絞り込み数字」の出現確率（ウエイト）をさらに5倍に強化
         for n in pool_numbers:
             if n in bias_numbers:
-                base_counts[n] *= 5
+                base_weights[n] *= 5
                 
-        total_count = sum(base_counts.values())
-        pool_weights = [base_counts[n] / total_count for n in pool_numbers]
+        total_weight = sum(base_weights.values())
+        pool_weights = [base_weights[n] / total_weight for n in pool_numbers]
         
         if st.button(f"🚀 【{loto_type}】次回予想を展開する", type="primary"):
             lucky_numbers = []
@@ -200,16 +239,12 @@ with col2:
             
             while len(lucky_numbers) < 5 and attempts < max_attempts:
                 attempts += 1
-                
-                # 重み（確率）に基づき、重複なしで数字をランダムサンプリング
                 sample_comb = sorted(np.random.choice(pool_numbers, size=pick_num, replace=False, p=pool_weights).tolist())
                 
-                # 【関門1】 合計値の範囲チェック
                 total_val = sum(sample_comb)
                 if not (sum_range[0] <= total_val <= sum_range[1]):
                     continue
                     
-                # 【関門2】 ゲイル理論調和フィルターチェック
                 if attempts < 1500:
                     if not check_gail_filters(sample_comb, loto_type, use_gail_hilow, use_gail_consec):
                         continue
@@ -217,14 +252,12 @@ with col2:
                 if sample_comb not in lucky_numbers:
                     lucky_numbers.append(sample_comb)
             
-            # 【最終セーフティ補填】
             while len(lucky_numbers) < 5:
                 sample_comb = sorted(random.sample(pool_numbers, pick_num))
                 if sample_comb not in lucky_numbers:
                     lucky_numbers.append(sample_comb)
             
-            # 予測結果の画面出力
-            st.caption(f"💡 ゲイル流合計範囲（{sum_range[0]} - {sum_range[1]}）および各バイアス設定をクリアした予想目です。")
+            st.caption(f"💡 過去50回のトレンド、各バイアス（CSV）、およびゲイル流合計範囲（{sum_range[0]} - {sum_range[1]}）を完全クリアした予想目です。")
             for i, comb in enumerate(lucky_numbers, 1):
                 formatted_comb = "  ".join([f"{num:02d}" for num in comb])
                 st.success(f"**【{i}点目】** ──  ` {formatted_comb} `  (合計値: {sum(comb)})")
