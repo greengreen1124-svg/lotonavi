@@ -8,11 +8,11 @@ import streamlit as st
 from bs4 import BeautifulSoup
 
 # ==================================================
-# ページ設定（ゲイル理論＋各くじ種bias.csv自動参照版）
+# ページ設定（ゲイル理論＋特殊バイアスCSV完全解析版）
 # ==================================================
-st.set_page_config(page_title="ロトAI予想・トレンド分析サイト (Gail Howard流アドオン＋各くじ種bias統合版)", page_icon="🎰", layout="wide")
+st.set_page_config(page_title="ロトAI予想・トレンド分析サイト", page_icon="🎰", layout="wide")
 st.title("👑 ロトAI予想・トレンド分析サイト")
-st.subheader("Gail Howard流アドオン ＆ 各くじ種別 bias.csv 自動参照システム")
+st.subheader("Gail Howard流アドオン ＆ 横型 bias.csv 特殊フォーマット対応システム")
 
 loto_type = st.sidebar.selectbox("予測するくじ種を選択", ["ロト6", "ロト7", "ミニロト"])
 
@@ -77,39 +77,41 @@ def fetch_latest_sougaku_result(loto_kind):
     return {"success": False, "msg": "該当データ行が見つかりませんでした"}
 
 # ==================================================
-# 2. 各種 bias.csv の動的・自動読み込み処理
+# 2. 特殊な横型 bias.csv のパース（解析）処理
 # ==================================================
 bias_numbers = []
 delete_numbers = []
 
 if os.path.exists(bias_file):
     try:
-        try:
-            df_bias = pd.read_csv(bias_file, encoding="utf-8")
-        except:
-            df_bias = pd.read_csv(bias_file, encoding="shift_jis")
+        # 特殊な行単位のテキストとしてCSVを読み込む
+        with open(bias_file, mode="r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
         
-        # 列名の前後の空白をトリム
-        df_bias.columns = [str(c).strip() for c in df_bias.columns]
-        
-        # ヘッダー名から「絞り込み/注目(bias)」と「削除/除外(delete)」の列を自動判定
-        bias_col = next((c for c in df_bias.columns if "bias" in c.lower() or "絞り込み" in c or "注目" in c), None)
-        del_col = next((c for c in df_bias.columns if "delete" in c.lower() or "削除" in c or "除外" in c), None)
-        
-        if bias_col:
-            bias_numbers = df_bias[bias_col].dropna().astype(int).tolist()
-        if del_col:
-            delete_numbers = df_bias[del_col].dropna().astype(int).tolist()
-            
-        # [フォールバック] ヘッダーで判定できない場合、1列目を絞り込み、2列目を削除とする
-        if not bias_col and not df_bias.empty:
-            bias_numbers = pd.to_numeric(df_bias.iloc[:, 0], errors='coerce').dropna().astype(int).tolist()
-            if df_bias.shape[1] > 1:
-                delete_numbers = pd.to_numeric(df_bias.iloc[:, 1], errors='coerce').dropna().astype(int).tolist()
+        for line in lines:
+            line_str = line.strip()
+            if not line_str:
+                continue
                 
-        st.sidebar.success(f"📂 設定ファイル `{bias_file}` を適用しました。")
+            # カンマで分割 (例: ['削除数字', '04 25 26 29 30 37'])
+            parts = line_str.split(",", 1)
+            if len(parts) < 2:
+                continue
+                
+            header_name = parts[0].strip()
+            numbers_str = parts[1].strip()
+            
+            # スペース等で区切られた数字文字列を整数のリストに変換
+            extracted_nums = [int(n) for n in re.findall(r'\d+', numbers_str)]
+            
+            if "削除" in header_name or "delete" in header_name.lower():
+                delete_numbers = extracted_nums
+            elif "絞り込み" in header_name or "注目" in header_name or "bias" in header_name.lower():
+                bias_numbers = extracted_nums
+                
+        st.sidebar.success(f"📂 設定ファイル `{bias_file}` を解析・適用しました。")
     except Exception as e:
-        st.sidebar.error(f"⚠️ `{bias_file}` の読み込み中にエラーが発生しました: {e}")
+        st.sidebar.error(f"⚠️ `{bias_file}` の解析中にエラーが発生しました: {e}")
 else:
     st.sidebar.warning(f"⚠️ 該当する設定ファイル `{bias_file}` がリポジトリ内に見つかりません。")
 
@@ -117,7 +119,6 @@ else:
 # 3. ゲイル理論 フィルター関数
 # ==================================================
 def check_gail_filters(comb, loto_kind, use_hilow, use_consec):
-    # 高低の境界値を設定
     if loto_kind == "ロト6":
         mid = 22
     elif loto_kind == "ロト7":
@@ -126,15 +127,12 @@ def check_gail_filters(comb, loto_kind, use_hilow, use_consec):
         mid = 15
         
     low_count = len([n for n in comb if n <= mid])
-    high_count = len(comb) - low_count
     
-    # 関門A: 高低黄金比率フィルター (偏りすぎた出目を排除)
     if use_hilow:
         if loto_kind == "ロト6" and not (2 <= low_count <= 4): return False
         if loto_kind == "ロト7" and not (3 <= low_count <= 4): return False
         if loto_kind == "ミニロト" and not (2 <= low_count <= 3): return False
 
-    # 関門B: 連続数字調和制御 (3連続以上や複数ペアの過剰な連続目を排除)
     if use_consec:
         consec_pairs = 0
         for i in range(len(comb) - 1):
@@ -187,27 +185,18 @@ with col2:
         # すべての数字の初期出現重みを一律「10」に設定
         base_counts = {n: 10 for n in pool_numbers}
         
-        # 📂 もし過去の履歴CSVファイルがあればベースの頻度を読み込む（拡張用）
-        if os.path.exists(history_file):
-            try:
-                df_hist = pd.read_csv(history_file)
-                # ここに過去の集計ロジックを必要に応じて追加可能
-            except:
-                pass
-        
-        # 🎯 【最重要】CSVから読み込んだ「絞り込み数字」の出現確率（ウエイト）を3倍に強化
+        # 🎯 【重要】CSVから読み込んだ「絞り込み数字」の出現確率（ウエイト）を5倍に大幅強化
         for n in pool_numbers:
             if n in bias_numbers:
-                base_counts[n] *= 3
+                base_counts[n] *= 5
                 
-        # サンプリング用に確率の合計が 1 になるよう正規化
         total_count = sum(base_counts.values())
         pool_weights = [base_counts[n] / total_count for n in pool_numbers]
         
         if st.button(f"🚀 【{loto_type}】次回予想を展開する", type="primary"):
             lucky_numbers = []
             attempts = 0
-            max_attempts = 2000
+            max_attempts = 3000
             
             while len(lucky_numbers) < 5 and attempts < max_attempts:
                 attempts += 1
@@ -221,22 +210,21 @@ with col2:
                     continue
                     
                 # 【関門2】 ゲイル理論調和フィルターチェック
-                # ※条件が厳しすぎてフリーズするのを防ぐセーフティ（1000回超えたら自動バイパス）
-                if attempts < 1000:
+                if attempts < 1500:
                     if not check_gail_filters(sample_comb, loto_type, use_gail_hilow, use_gail_consec):
                         continue
                         
                 if sample_comb not in lucky_numbers:
                     lucky_numbers.append(sample_comb)
             
-            # 【最終セーフティ補填】万が一5点に満たない場合は純粋なランダムで補填
+            # 【最終セーフティ補填】
             while len(lucky_numbers) < 5:
                 sample_comb = sorted(random.sample(pool_numbers, pick_num))
                 if sample_comb not in lucky_numbers:
                     lucky_numbers.append(sample_comb)
             
             # 予測結果の画面出力
-            st.caption(f"💡 ゲイル流合計範囲（{sum_range[0]} - {sum_range[1]}）および各種調和関門をクリアした合格目を出力しました。")
+            st.caption(f"💡 ゲイル流合計範囲（{sum_range[0]} - {sum_range[1]}）および各バイアス設定をクリアした予想目です。")
             for i, comb in enumerate(lucky_numbers, 1):
                 formatted_comb = "  ".join([f"{num:02d}" for num in comb])
                 st.success(f"**【{i}点目】** ──  ` {formatted_comb} `  (合計値: {sum(comb)})")
