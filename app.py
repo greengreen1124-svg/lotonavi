@@ -11,7 +11,7 @@ from collections import Counter
 # ==================================================
 st.set_page_config(page_title="ロトAI予想・トレンド分析サイト", page_icon="🎰", layout="wide")
 st.title("👑 ロトAI予想・トレンド分析サイト")
-st.subheader("Gail Howard流アドオン ＆ 横型 bias.csv ＆ CSV最新回データ完全参照システム")
+st.subheader("Gail Howard流アドオン ＆ 横型 bias.csv ＆ CSV最新最下部参照システム")
 
 loto_type = st.sidebar.selectbox("予測するくじ種を選択", ["ロト6", "ロト7", "ミニロト"])
 
@@ -36,10 +36,10 @@ else:  # ミニロト
     default_min_sum, default_max_sum = 65, 95
 
 # ==================================================
-# 1. データ参照ロジック（CSVファイルから最新回を取得）
+# 1. データ参照ロジック（CSVファイルの【最終行】から最新回を取得）
 # ==================================================
 def fetch_latest_csv_result(history_file, pick_num):
-    """CSV履歴ファイルから最新（1行目）のロト結果を自動抽出する"""
+    """CSV履歴ファイルから最新（最終行）のロト結果を自動抽出する"""
     if not os.path.exists(history_file):
         return {"success": False, "msg": f"履歴ファイル `{history_file}` が見つかりません"}
     try:
@@ -51,8 +51,8 @@ def fetch_latest_csv_result(history_file, pick_num):
         if df_hist.empty:
             return {"success": False, "msg": "履歴ファイルが空です"}
             
-        # 過去50回集計の仕様（上ほど最新）に合わせ、1行目(インデックス0)を最新回として取得
-        latest_row = df_hist.iloc[0]
+        # 【修正】CSVの一番下が最新回のため、最終行(iloc[-1])を取得
+        latest_row = df_hist.iloc[-1]
         
         # 本数字の列を自動抽出（「第○数字」などのヘッダーを検索）
         num_cols = [c for c in df_hist.columns if "第" in c and "数字" in c and "BONUS" not in c and "ボーナス" not in c]
@@ -117,7 +117,7 @@ else:
     st.sidebar.warning(f"⚠️ `{bias_file}` が見つかりません。")
 
 # ==================================================
-# 3. 過去50回の履歴データから出現頻度（スコア）を集計
+# 3. 履歴データの【下から50回分】から出現頻度（スコア）を集計
 # ==================================================
 score_table = pd.DataFrame(index=range(1, max_num + 1))
 score_table["出現回数"] = 0
@@ -133,7 +133,8 @@ if os.path.exists(history_file):
         if not num_cols:
             num_cols = df_hist.columns[2:2+pick_num]
             
-        df_recent = df_hist.head(50)
+        # 【修正】CSVの下部が最新のため、下から50行分(tail(50))を抽出して集計
+        df_recent = df_hist.tail(50)
         all_past_nums = []
         for col in num_cols:
             all_past_nums.extend(df_recent[col].dropna().astype(int).tolist())
@@ -189,7 +190,7 @@ def check_gail_filters(comb, loto_kind, use_hilow, use_consec):
 # ==================================================
 # 5. メイン画面レイアウト
 # ==================================================
-# 創楽の代わりにCSVから最新情報を取得
+# CSVの最終行から最新情報を取得
 latest_info = fetch_latest_csv_result(history_file, pick_num)
 
 col1, col2 = st.columns(2)
@@ -197,7 +198,7 @@ col1, col2 = st.columns(2)
 with col1:
     st.header("📊 現在のステータス & 設定")
     if latest_info["success"]:
-        st.success(f"✅ 【同期成功】履歴CSVから最新の出目データを読み込みました。")
+        st.success(f"✅ 【同期成功】履歴CSVの最下部から最新の出目データを読み込みました。")
         st.write(f"🏆 **前回（最新）の本数字出目:** 第 **{latest_info['round']}** 回 （セット球: **{latest_info['set']}**）")
         st.code("  ".join([f"{num:02d}" for num in sorted(latest_info['numbers'])]))
     else:
@@ -212,7 +213,7 @@ with col1:
         st.markdown("🎯 **絞り込み数字 (出現確率アップ):**")
         st.code(" ".join([f"[{n:02d}]" for n in sorted(bias_numbers)]) if bias_numbers else "なし")
 
-    st.markdown("### 📈 過去50回のグループ分け簡易要約")
+    st.markdown("### 📈 直近50回（CSV最下部50行）のグループ分け簡易要約")
     high_nums = score_table[score_table["グループ"] == "高頻度"].index.tolist()
     mid_nums = score_table[score_table["グループ"] == "中頻度"].index.tolist()
     low_nums = score_table[score_table["グループ"] == "低頻度"].index.tolist()
@@ -221,7 +222,7 @@ with col1:
     st.warning(f"**【中頻度（ミドル）】** {', '.join([f'{n:02d}' for n in mid_nums])}")
     st.error(f"**【低頻度（コールド）】** {', '.join([f'{n:02d}' for n in low_nums])}")
 
-    # 📊 全数字の詳細スコア内訳表セクション（維持）
+    # 📊 全数字の詳細スコア内訳表（直近50回ベースに自動連動）
     st.markdown("### 📋 全数字のスコア・ステータス詳細内訳表")
     display_table = score_table.copy()
     display_table.index.name = "数字"
@@ -243,6 +244,7 @@ with col2:
     else:
         base_weights = {}
         for n in pool_numbers:
+            # 直近50回の出現回数をベース重みに設定
             past_count = score_table.at[n, "出現回数"] if n in score_table.index else 0
             base_weights[n] = max(1, past_count)
             
@@ -278,7 +280,7 @@ with col2:
                 if sample_comb not in lucky_numbers:
                     lucky_numbers.append(sample_comb)
             
-            st.caption(f"💡 過去50回のトレンド、各バイアス（CSV）、およびゲイル流合計範囲（{sum_range[0]} - {sum_range[1]}）を完全クリアした予想目です。")
+            st.caption(f"💡 直近50回のトレンド、各バイアス（CSV）、およびゲイル流合計範囲（{sum_range[0]} - {sum_range[1]}）を完全クリアした予想目です。")
             for i, comb in enumerate(lucky_numbers, 1):
                 formatted_comb = "  ".join([f"{num:02d}" for num in comb])
                 st.success(f"**【{i}点目】** ──  ` {formatted_comb} `  (合計値: {sum(comb)})")
