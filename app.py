@@ -3,9 +3,7 @@ import re
 import random
 import numpy as np
 import pandas as pd
-import requests
 import streamlit as st
-from bs4 import BeautifulSoup
 from collections import Counter
 
 # ==================================================
@@ -13,7 +11,7 @@ from collections import Counter
 # ==================================================
 st.set_page_config(page_title="ロトAI予想・トレンド分析サイト", page_icon="🎰", layout="wide")
 st.title("👑 ロトAI予想・トレンド分析サイト")
-st.subheader("Gail Howard流アドオン ＆ 横型 bias.csv ＆ 全数字詳細スコア表 統合システム")
+st.subheader("Gail Howard流アドオン ＆ 横型 bias.csv ＆ CSV最新回データ完全参照システム")
 
 loto_type = st.sidebar.selectbox("予測するくじ種を選択", ["ロト6", "ロト7", "ミニロト"])
 
@@ -38,44 +36,56 @@ else:  # ミニロト
     default_min_sum, default_max_sum = 65, 95
 
 # ==================================================
-# 1. データ自動更新ロジック（Webスクレイピング）
+# 1. データ参照ロジック（CSVファイルから最新回を取得）
 # ==================================================
-def fetch_latest_sougaku_result(loto_kind):
-    """sougaku.com（ロト生活）から最新のロト結果を自動取得する"""
-    url_type = "mini" if loto_kind == "ミニロト" else ("loto6" if loto_kind == "ロト6" else "loto7")
-    url = f"http://sougaku.com/{url_type}/index.html"
+def fetch_latest_csv_result(history_file, pick_num):
+    """CSV履歴ファイルから最新（1行目）のロト結果を自動抽出する"""
+    if not os.path.exists(history_file):
+        return {"success": False, "msg": f"履歴ファイル `{history_file}` が見つかりません"}
     try:
-        res = requests.get(url, timeout=10)
-        res.encoding = res.apparent_encoding if res.apparent_encoding else "utf-8"
-        soup = BeautifulSoup(res.text, "html.parser")
-
-        p_num = 7 if loto_kind == "ロト7" else (6 if loto_kind == "ロト6" else 5)
-        b_num = 2 if loto_kind == "ロト7" else 1
-        total_nums_needed = p_num + b_num
-
-        for tr in soup.find_all("tr"):
-            cells = [c.get_text().strip() for c in tr.find_all(["td", "th"])]
-            cells = [c for c in cells if c]
-            if len(cells) < 5:
-                continue
-            joined_text = " ".join(cells)
-            all_digits = [int(s) for s in re.findall(r'\d+', joined_text)]
+        try:
+            df_hist = pd.read_csv(history_file, encoding="utf-8")
+        except:
+            df_hist = pd.read_csv(history_file, encoding="shift_jis")
+        
+        if df_hist.empty:
+            return {"success": False, "msg": "履歴ファイルが空です"}
             
-            if len(all_digits) >= total_nums_needed + 1:
-                round_no = all_digits[0]
-                drawn_nums = all_digits[1:p_num+1]
-                bonus_nums = all_digits[p_num+1:total_nums_needed+1]
-                
-                set_letter = "不明"
-                for c in cells:
-                    m = re.search(r'\b([A-J])\b', c)
-                    if m:
-                        set_letter = m.group(1)
-                        break
-                return {"success": True, "round": round_no, "numbers": drawn_nums, "bonus": bonus_nums, "set": set_letter}
+        # 過去50回集計の仕様（上ほど最新）に合わせ、1行目(インデックス0)を最新回として取得
+        latest_row = df_hist.iloc[0]
+        
+        # 本数字の列を自動抽出（「第○数字」などのヘッダーを検索）
+        num_cols = [c for c in df_hist.columns if "第" in c and "数字" in c and "BONUS" not in c and "ボーナス" not in c]
+        if not num_cols:
+            num_cols = df_hist.columns[2:2+pick_num] # 見つからない場合のフォールバック
+            
+        drawn_nums = latest_row[num_cols].dropna().astype(int).tolist()
+        
+        # 回号（回数）列の抽出
+        round_col = next((c for c in df_hist.columns if "回" in c or "回数" in c or "回号" in c), df_hist.columns[0])
+        round_val = latest_row[round_col]
+        try:
+            round_no = int(re.search(r'\d+', str(round_val)).group())
+        except:
+            round_no = round_val
+            
+        # ボーナス数字列の抽出
+        bonus_cols = [c for c in df_hist.columns if "ボーナス" in c or "BONUS" in c]
+        bonus_nums = latest_row[bonus_cols].dropna().astype(int).tolist() if bonus_cols else []
+        
+        # セット球列の抽出
+        set_col = next((c for c in df_hist.columns if "セット" in c or "set" in c.lower()), None)
+        set_letter = str(latest_row[set_col]).strip() if set_col else "なし"
+        
+        return {
+            "success": True, 
+            "round": round_no, 
+            "numbers": drawn_nums, 
+            "bonus": bonus_nums, 
+            "set": set_letter
+        }
     except Exception as e:
         return {"success": False, "msg": str(e)}
-    return {"success": False, "msg": "該当データ行が見つかりませんでした"}
 
 # ==================================================
 # 2. 特殊な横型 bias.csv のパース（解析）処理
@@ -179,18 +189,19 @@ def check_gail_filters(comb, loto_kind, use_hilow, use_consec):
 # ==================================================
 # 5. メイン画面レイアウト
 # ==================================================
-latest_info = fetch_latest_sougaku_result(loto_type)
+# 創楽の代わりにCSVから最新情報を取得
+latest_info = fetch_latest_csv_result(history_file, pick_num)
 
 col1, col2 = st.columns(2)
 
 with col1:
     st.header("📊 現在のステータス & 設定")
     if latest_info["success"]:
-        st.success(f"✅ 【通信成功】創楽から最新の出目データを同期しました。")
+        st.success(f"✅ 【同期成功】履歴CSVから最新の出目データを読み込みました。")
         st.write(f"🏆 **前回（最新）の本数字出目:** 第 **{latest_info['round']}** 回 （セット球: **{latest_info['set']}**）")
         st.code("  ".join([f"{num:02d}" for num in sorted(latest_info['numbers'])]))
     else:
-        st.error(f"⚠️ 最新結果取得失敗: {latest_info.get('msg')}")
+        st.error(f"⚠️ 最新結果のCSV読み込み失敗: {latest_info.get('msg')}")
         
     st.markdown("### 🎯 CSV参照結果（ビアス式数字）")
     c_del, c_foc = st.columns(2)
@@ -210,11 +221,10 @@ with col1:
     st.warning(f"**【中頻度（ミドル）】** {', '.join([f'{n:02d}' for n in mid_nums])}")
     st.error(f"**【低頻度（コールド）】** {', '.join([f'{n:02d}' for n in low_nums])}")
 
-    # 📊 【完全復活】全数字の詳細スコア内訳表セクション
+    # 📊 全数字の詳細スコア内訳表セクション（維持）
     st.markdown("### 📋 全数字のスコア・ステータス詳細内訳表")
     display_table = score_table.copy()
     display_table.index.name = "数字"
-    # インデックスを「01, 02...」と綺麗に見せるための整形をして表示
     display_table.index = [f"{i:02d}" for i in display_table.index]
     st.dataframe(display_table, use_container_width=True, height=400)
 
